@@ -8,6 +8,13 @@ fn embedding(vocab_size: usize, hidden_size: usize, vb: VarBuilder) -> Result<Em
     Ok(Embedding::new(embeddings, hidden_size))
 }
 
+fn masked_fill(on_false: &Tensor, mask: &Tensor, on_true: f32) -> Result<Tensor> {
+    let shape = mask.shape();
+    let on_true = Tensor::new(on_true, on_false.device())?.broadcast_as(shape.dims())?;
+    let m = mask.where_cond(&on_true, on_false)?;
+    Ok(m)
+}
+
 // NOTE: Dropout is not implemented in candle_nn yet
 struct Dropout {
     #[allow(dead_code)]
@@ -126,8 +133,8 @@ struct EsmEmbeddings {
     // layer_norm: Option<LayerNorm>,
     // register_buffer // FIX: what is this?
     // padding_idx
-    // token_dropout
-    // mask_token_id
+    token_dropout: bool,
+    mask_token_id: usize,
 }
 
 impl EsmEmbeddings {
@@ -156,17 +163,32 @@ impl EsmEmbeddings {
             dropout,
             // layer_norm,
             // padding_idx: config.pad_token_id,
-            // token_dropout: config.token_dropout,
-            // mask_token_id: config.mask_token_id,
+            token_dropout: config.token_dropout,
+            mask_token_id: config.mask_token_id,
         })
     }
 
-    fn forward(&self, input_ids: &Tensor, token_type_ids: &Tensor) -> Result<Tensor> {
+    fn forward(&self, input_ids: &Tensor, attention_mask: &Tensor, token_type_ids: &Tensor) -> Result<Tensor> {
         let input_embeddings = self.word_embeddings.forward(input_ids)?;
         let mut embeddings = input_embeddings; // TODO: replace this with positions etc
+        if self.token_dropout {
+            let mask = input_ids.eq(
+                &Tensor::new(
+                    &[self.mask_token_id as u8], 
+                    input_ids.device()
+                )?.broadcast_as(input_ids.shape())?
+            )?;
+            embeddings = masked_fill(&embeddings, &mask, 0.0)?;
+            let mask_ratio_train = 0.15 * 0.8;
+            let src_lenghts = attention_mask.sum(1);
+            let mask_ratio_observed = mask.sum(1) / src_lenghts;
+            embeddings = 
+        }
+        // layer_norm
         // if let Some(layer_norm) = &self.layer_norm {
         //     embeddings = layer_norm.forward(&embeddings)?
         // }
+        // attention_mask
         let embeddings = self.dropout.forward(&embeddings)?;
         Ok(embeddings)
     }
